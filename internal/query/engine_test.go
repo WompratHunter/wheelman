@@ -1,6 +1,7 @@
 package query_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -238,6 +239,194 @@ func TestEngine_Run_taggedWithSourceAppAndPod(t *testing.T) {
 	}
 	if line.Pod != pod {
 		t.Errorf("line.Pod = %+v, want %+v", line.Pod, pod)
+	}
+}
+
+func TestEngine_Run_scopesToNamedApp(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	checkoutWorkload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	workerWorkload := cluster.Workload{Kind: cluster.WorkloadKindStatefulSet, Namespace: "default", Name: "worker", Selector: cluster.Selector{"app": "worker"}}
+
+	checkoutPod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+	workerPod := cluster.Pod{Namespace: "default", Name: "worker-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(checkoutWorkload, []cluster.Pod{checkoutPod})
+	fake.SetPodsForWorkload(workerWorkload, []cluster.Pod{workerPod})
+	fake.SetLogsForPod(checkoutPod, []cluster.LogLine{
+		{Timestamp: now.Add(-10 * time.Minute), Text: "boom: payment failed"},
+	})
+	fake.SetLogsForPod(workerPod, []cluster.LogLine{
+		{Timestamp: now.Add(-5 * time.Minute), Text: "boom: queue drained"},
+	})
+
+	apps := []domain.AppConfig{
+		{Name: "checkout", Workload: checkoutWorkload},
+		{Name: "worker", Workload: workerWorkload},
+	}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("app:checkout boom")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+	if result.Lines[0].App != "checkout" {
+		t.Errorf("Run() line.App = %q, want %q", result.Lines[0].App, "checkout")
+	}
+}
+
+func TestEngine_Run_scopesToMultipleNamedApps(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	checkoutWorkload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	workerWorkload := cluster.Workload{Kind: cluster.WorkloadKindStatefulSet, Namespace: "default", Name: "worker", Selector: cluster.Selector{"app": "worker"}}
+	billingWorkload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "billing", Selector: cluster.Selector{"app": "billing"}}
+
+	checkoutPod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+	workerPod := cluster.Pod{Namespace: "default", Name: "worker-0"}
+	billingPod := cluster.Pod{Namespace: "default", Name: "billing-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(checkoutWorkload, []cluster.Pod{checkoutPod})
+	fake.SetPodsForWorkload(workerWorkload, []cluster.Pod{workerPod})
+	fake.SetPodsForWorkload(billingWorkload, []cluster.Pod{billingPod})
+	fake.SetLogsForPod(checkoutPod, []cluster.LogLine{
+		{Timestamp: now.Add(-10 * time.Minute), Text: "boom: payment failed"},
+	})
+	fake.SetLogsForPod(workerPod, []cluster.LogLine{
+		{Timestamp: now.Add(-5 * time.Minute), Text: "boom: queue drained"},
+	})
+	fake.SetLogsForPod(billingPod, []cluster.LogLine{
+		{Timestamp: now.Add(-5 * time.Minute), Text: "boom: invoice failed"},
+	})
+
+	apps := []domain.AppConfig{
+		{Name: "checkout", Workload: checkoutWorkload},
+		{Name: "worker", Workload: workerWorkload},
+		{Name: "billing", Workload: billingWorkload},
+	}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("app:checkout app:worker boom")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+
+	gotApps := map[string]bool{}
+	for _, l := range result.Lines {
+		gotApps[l.App] = true
+	}
+	if len(result.Lines) != 2 || !gotApps["checkout"] || !gotApps["worker"] {
+		t.Errorf("Run() lines = %+v, want lines tagged with checkout and worker only", result.Lines)
+	}
+}
+
+func TestEngine_Run_namedAppWithNoRemainingKeywordMatchesAllLines(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	checkoutWorkload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	workerWorkload := cluster.Workload{Kind: cluster.WorkloadKindStatefulSet, Namespace: "default", Name: "worker", Selector: cluster.Selector{"app": "worker"}}
+
+	checkoutPod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+	workerPod := cluster.Pod{Namespace: "default", Name: "worker-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(checkoutWorkload, []cluster.Pod{checkoutPod})
+	fake.SetPodsForWorkload(workerWorkload, []cluster.Pod{workerPod})
+	fake.SetLogsForPod(checkoutPod, []cluster.LogLine{
+		{Timestamp: now.Add(-10 * time.Minute), Text: "anything at all"},
+	})
+	fake.SetLogsForPod(workerPod, []cluster.LogLine{
+		{Timestamp: now.Add(-5 * time.Minute), Text: "should not appear"},
+	})
+
+	apps := []domain.AppConfig{
+		{Name: "checkout", Workload: checkoutWorkload},
+		{Name: "worker", Workload: workerWorkload},
+	}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("app:checkout")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+	if result.Lines[0].App != "checkout" {
+		t.Errorf("Run() line.App = %q, want %q", result.Lines[0].App, "checkout")
+	}
+}
+
+func TestEngine_Run_appNameMatchingIsCaseInsensitive(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	workload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	pod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(workload, []cluster.Pod{pod})
+	fake.SetLogsForPod(pod, []cluster.LogLine{
+		{Timestamp: now.Add(-10 * time.Minute), Text: "boom"},
+	})
+
+	apps := []domain.AppConfig{{Name: "checkout", Workload: workload}}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("app:CHECKOUT boom")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+}
+
+func TestEngine_Run_unknownAppNameReturnsErrorAndNoResults(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	checkoutWorkload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	checkoutPod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(checkoutWorkload, []cluster.Pod{checkoutPod})
+	fake.SetLogsForPod(checkoutPod, []cluster.LogLine{
+		{Timestamp: now.Add(-10 * time.Minute), Text: "boom"},
+	})
+
+	apps := []domain.AppConfig{
+		{Name: "checkout", Workload: checkoutWorkload},
+		{Name: "worker", Workload: cluster.Workload{Kind: cluster.WorkloadKindStatefulSet, Namespace: "default", Name: "worker"}},
+	}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("app:nonexistent boom")
+	if err == nil {
+		t.Fatalf("Run() returned no error, want an error naming the unconfigured App")
+	}
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("Run() error = %q, want it to mention the unconfigured App name %q", err.Error(), "nonexistent")
+	}
+	if !strings.Contains(err.Error(), "checkout") || !strings.Contains(err.Error(), "worker") {
+		t.Errorf("Run() error = %q, want it to list configured App names checkout and worker", err.Error())
+	}
+	if len(result.Lines) != 0 {
+		t.Errorf("Run() returned %d lines, want 0 on error", len(result.Lines))
+	}
+}
+
+func TestEngine_Run_unknownAppNameWithNoConfiguredApps(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	fake := cluster.NewFakeClusterClient()
+	e := newTestEngine(t, nil, fake, now)
+
+	_, err := e.Run("app:checkout boom")
+	if err == nil {
+		t.Fatalf("Run() returned no error, want an error naming the unconfigured App")
 	}
 }
 
