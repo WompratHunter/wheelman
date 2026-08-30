@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/WompratHunter/wheelman/internal/cluster"
@@ -17,6 +18,11 @@ import (
 // defaultWindow is the search window applied when a query names no time
 // phrase. See CONTEXT.md's Query-to-Filter compilation rules.
 const defaultWindow = time.Hour
+
+// appPhrase recognizes an App-name phrase: the literal "app:" prefix
+// immediately followed by the named App, e.g. "app:checkout". See
+// CONTEXT.md's Query-to-Filter compilation rules.
+var appPhrase = regexp.MustCompile(`(?i)\bapp:(\S+)`)
 
 // Engine is the single entry point for running a Query against Wheelman's
 // configured Apps.
@@ -41,23 +47,41 @@ func NewEngine(apps []domain.AppConfig, client cluster.ClusterClient) *Engine {
 // Run parses queryText into a Filter and executes it, returning a flat,
 // chronologically-ordered, App/pod-tagged Result.
 //
-// v1 has no query grammar yet: the entire query text is treated as a single
-// literal keyword/regex search term, scoped to all configured Apps over the
-// last 1 hour. See CONTEXT.md's "unrecognized text falls back to keyword
-// search" rule.
+// Beyond App-name recognition (via "app:<Name>" phrases), v1 has no further
+// query grammar yet: any remaining query text is treated as a single literal
+// keyword/regex search term, over the last 1 hour. See CONTEXT.md's
+// "unrecognized text falls back to keyword search" rule.
 func (e *Engine) Run(queryText string) (domain.Result, error) {
 	now := e.Now()
-	filter := domain.Filter{
-		Since:    now.Add(-defaultWindow),
-		Until:    now,
-		Keywords: []string{queryText},
+
+	remaining, names := extractAppNames(queryText)
+	scopedApps, err := matchConfiguredApps(names, e.apps)
+	if err != nil {
+		return domain.Result{}, err
 	}
 
-	match := keywordMatcher(filter.Keywords[0])
+	filter := domain.Filter{
+		Since: now.Add(-defaultWindow),
+		Until: now,
+	}
+	if len(names) > 0 {
+		filter.Apps = make([]string, len(scopedApps))
+		for i, app := range scopedApps {
+			filter.Apps[i] = app.Name
+		}
+	}
+	if remaining != "" {
+		filter.Keywords = []string{remaining}
+	}
+
+	match := func(string) bool { return true }
+	if len(filter.Keywords) > 0 {
+		match = keywordMatcher(filter.Keywords[0])
+	}
 
 	ctx := context.Background()
 	var lines []domain.ResultLine
-	for _, app := range e.apps {
+	for _, app := range scopedApps {
 		pods, err := e.client.ResolvePods(ctx, app.Workload)
 		if err != nil {
 			return domain.Result{}, fmt.Errorf("resolving pods for App %q: %w", app.Name, err)
@@ -89,6 +113,63 @@ func (e *Engine) Run(queryText string) (domain.Result, error) {
 	})
 
 	return domain.Result{Lines: lines}, nil
+}
+
+// extractAppNames pulls every "app:<Name>" phrase out of queryText, returning
+// the named Apps (in first-seen order, deduplicated) and the remaining text
+// with those phrases removed and whitespace collapsed.
+func extractAppNames(queryText string) (remaining string, names []string) {
+	seen := make(map[string]bool)
+	remaining = appPhrase.ReplaceAllStringFunc(queryText, func(match string) string {
+		name := appPhrase.FindStringSubmatch(match)[1]
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+		return ""
+	})
+	remaining = strings.TrimSpace(strings.Join(strings.Fields(remaining), " "))
+	return remaining, names
+}
+
+// matchConfiguredApps resolves names (as extracted by extractAppNames)
+// against apps, matching case-insensitively. It returns the scoped Apps, or
+// an error listing the configured App names if any name isn't configured. No
+// names scopes to all of apps, per CONTEXT.md's "no named Apps -> all
+// configured Apps" default.
+func matchConfiguredApps(names []string, apps []domain.AppConfig) (scoped []domain.AppConfig, err error) {
+	if len(names) == 0 {
+		return apps, nil
+	}
+	for _, name := range names {
+		app, ok := findAppByName(apps, name)
+		if !ok {
+			return nil, fmt.Errorf("query: app %q is not configured; configured apps: %s", name, configuredAppNamesList(apps))
+		}
+		scoped = append(scoped, app)
+	}
+	return scoped, nil
+}
+
+func findAppByName(apps []domain.AppConfig, name string) (domain.AppConfig, bool) {
+	for _, app := range apps {
+		if strings.EqualFold(app.Name, name) {
+			return app, true
+		}
+	}
+	return domain.AppConfig{}, false
+}
+
+func configuredAppNamesList(apps []domain.AppConfig) string {
+	if len(apps) == 0 {
+		return "(none configured)"
+	}
+	names := make([]string, len(apps))
+	for i, app := range apps {
+		names[i] = app.Name
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // keywordMatcher compiles term as a case-insensitive regex and returns a
