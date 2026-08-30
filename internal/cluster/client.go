@@ -51,8 +51,9 @@ type ClusterClient interface {
 	// the current kubeconfig context, for App setup.
 	ListWorkloads(ctx context.Context) ([]Workload, error)
 
-	// ResolvePods returns the pods currently matching a workload's selector.
-	ResolvePods(ctx context.Context, selector Selector) ([]Pod, error)
+	// ResolvePods returns the pods currently matching a workload's selector,
+	// scoped to the workload's namespace.
+	ResolvePods(ctx context.Context, workload Workload) ([]Pod, error)
 
 	// FetchLogs returns a pod's historical log lines.
 	FetchLogs(ctx context.Context, pod Pod) ([]LogLine, error)

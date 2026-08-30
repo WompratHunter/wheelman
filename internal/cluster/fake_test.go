@@ -44,16 +44,21 @@ func TestFakeClusterClient_ListWorkloads(t *testing.T) {
 }
 
 func TestFakeClusterClient_ResolvePods(t *testing.T) {
-	sel := cluster.Selector{"app": "checkout"}
+	checkout := cluster.Workload{
+		Kind:      cluster.WorkloadKindDeployment,
+		Namespace: "default",
+		Name:      "checkout",
+		Selector:  cluster.Selector{"app": "checkout"},
+	}
 	pods := []cluster.Pod{
 		{Namespace: "default", Name: "checkout-0"},
 		{Namespace: "default", Name: "checkout-1"},
 	}
 
 	fake := cluster.NewFakeClusterClient()
-	fake.SetPodsForSelector(sel, pods)
+	fake.SetPodsForWorkload(checkout, pods)
 
-	got, err := fake.ResolvePods(context.Background(), sel)
+	got, err := fake.ResolvePods(context.Background(), checkout)
 	if err != nil {
 		t.Fatalf("ResolvePods returned error: %v", err)
 	}
@@ -62,12 +67,33 @@ func TestFakeClusterClient_ResolvePods(t *testing.T) {
 	}
 }
 
-func TestFakeClusterClient_ResolvePods_unconfiguredSelector(t *testing.T) {
+func TestFakeClusterClient_ResolvePods_distinguishesWorkloadsWithSameSelector(t *testing.T) {
+	sel := cluster.Selector{"app": "checkout"}
+	deployment := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: sel}
+	decoy := cluster.Workload{Kind: cluster.WorkloadKindStatefulSet, Namespace: "default", Name: "checkout-canary", Selector: sel}
+
+	deploymentPods := []cluster.Pod{{Namespace: "default", Name: "checkout-0"}}
+	decoyPods := []cluster.Pod{{Namespace: "default", Name: "checkout-canary-0"}}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(deployment, deploymentPods)
+	fake.SetPodsForWorkload(decoy, decoyPods)
+
+	got, err := fake.ResolvePods(context.Background(), deployment)
+	if err != nil {
+		t.Fatalf("ResolvePods returned error: %v", err)
+	}
+	if !reflect.DeepEqual(got, deploymentPods) {
+		t.Errorf("ResolvePods(deployment) = %+v, want %+v", got, deploymentPods)
+	}
+}
+
+func TestFakeClusterClient_ResolvePods_unconfiguredWorkload(t *testing.T) {
 	fake := cluster.NewFakeClusterClient()
 
-	_, err := fake.ResolvePods(context.Background(), cluster.Selector{"app": "unknown"})
+	_, err := fake.ResolvePods(context.Background(), cluster.Workload{Namespace: "default", Name: "unknown"})
 	if err == nil {
-		t.Fatal("ResolvePods() with unconfigured selector: want error, got nil")
+		t.Fatal("ResolvePods() with unconfigured workload: want error, got nil")
 	}
 }
 

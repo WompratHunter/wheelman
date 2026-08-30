@@ -11,12 +11,12 @@ import (
 // so downstream tests never need a real cluster.
 type FakeClusterClient struct {
 	workloads      []Workload
-	podsBySelector []fakePodsEntry
+	podsByWorkload []fakePodsEntry
 	logsByPod      map[Pod][]LogLine
 }
 
 type fakePodsEntry struct {
-	selector Selector
+	workload Workload
 	pods     []Pod
 }
 
@@ -33,10 +33,10 @@ func (f *FakeClusterClient) AddWorkload(w Workload) {
 	f.workloads = append(f.workloads, w)
 }
 
-// SetPodsForSelector configures the pods ResolvePods returns for a given
-// selector.
-func (f *FakeClusterClient) SetPodsForSelector(selector Selector, pods []Pod) {
-	f.podsBySelector = append(f.podsBySelector, fakePodsEntry{selector: selector, pods: pods})
+// SetPodsForWorkload configures the pods ResolvePods returns for a given
+// workload.
+func (f *FakeClusterClient) SetPodsForWorkload(workload Workload, pods []Pod) {
+	f.podsByWorkload = append(f.podsByWorkload, fakePodsEntry{workload: workload, pods: pods})
 }
 
 // SetLogsForPod configures the log lines FetchLogs returns for a given pod.
@@ -48,13 +48,13 @@ func (f *FakeClusterClient) ListWorkloads(ctx context.Context) ([]Workload, erro
 	return f.workloads, nil
 }
 
-func (f *FakeClusterClient) ResolvePods(ctx context.Context, selector Selector) ([]Pod, error) {
-	for _, entry := range f.podsBySelector {
-		if reflect.DeepEqual(entry.selector, selector) {
+func (f *FakeClusterClient) ResolvePods(ctx context.Context, workload Workload) ([]Pod, error) {
+	for _, entry := range f.podsByWorkload {
+		if reflect.DeepEqual(entry.workload, workload) {
 			return entry.pods, nil
 		}
 	}
-	return nil, fmt.Errorf("fake cluster client: no pods configured for selector %v", selector)
+	return nil, fmt.Errorf("fake cluster client: no pods configured for workload %s/%s", workload.Namespace, workload.Name)
 }
 
 func (f *FakeClusterClient) FetchLogs(ctx context.Context, pod Pod) ([]LogLine, error) {

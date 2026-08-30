@@ -12,11 +12,8 @@ import (
 // chosen by the user from a discovered list, together with the selector
 // read from that workload's own spec.
 type AppConfig struct {
-	Name      string
-	Kind      cluster.WorkloadKind
-	Namespace string
-	Workload  string
-	Selector  cluster.Selector
+	Name     string
+	Workload cluster.Workload
 }
 
 // Filter is the structured, deterministic form a Query compiles down to:
@@ -44,7 +41,7 @@ type Filter struct {
 type ResultLine struct {
 	Timestamp time.Time
 	App       string
-	Pod       string
+	Pod       cluster.Pod
 	Text      string
 }
 
