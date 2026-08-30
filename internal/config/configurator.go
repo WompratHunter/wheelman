@@ -29,12 +29,22 @@ func (c *Configurator) ListCandidates(ctx context.Context) ([]cluster.Workload, 
 	return c.client.ListWorkloads(ctx)
 }
 
-// AddApp names workload as a new App and persists it. workload should come
-// from a prior call to ListCandidates, so its selector is the one read from
-// the workload's own spec rather than hand-authored.
-func (c *Configurator) AddApp(ctx context.Context, name string, workload cluster.Workload) (domain.AppConfig, error) {
-	if name == "" {
+// AddApp names app.Workload as a new App and persists it. app.Workload must
+// identify one of the workloads currently returned by ListCandidates; its
+// selector is always taken from that discovered workload, never from
+// app.Workload.Selector, so a caller can never hand-author one.
+func (c *Configurator) AddApp(ctx context.Context, app domain.AppConfig) (domain.AppConfig, error) {
+	if app.Name == "" {
 		return domain.AppConfig{}, errors.New("config: app name must not be empty")
+	}
+
+	candidates, err := c.client.ListWorkloads(ctx)
+	if err != nil {
+		return domain.AppConfig{}, err
+	}
+	workload, ok := findCandidate(candidates, app.Workload)
+	if !ok {
+		return domain.AppConfig{}, fmt.Errorf("config: %s/%s is not a discovered candidate", app.Workload.Namespace, app.Workload.Name)
 	}
 
 	apps, err := c.store.Load()
@@ -42,17 +52,28 @@ func (c *Configurator) AddApp(ctx context.Context, name string, workload cluster
 		return domain.AppConfig{}, err
 	}
 	for _, existing := range apps {
-		if existing.Name == name {
-			return domain.AppConfig{}, fmt.Errorf("config: app %q is already configured", name)
+		if existing.Name == app.Name {
+			return domain.AppConfig{}, fmt.Errorf("config: app %q is already configured", app.Name)
 		}
 	}
 
-	app := domain.AppConfig{Name: name, Workload: workload}
-	apps = append(apps, app)
+	configured := domain.AppConfig{Name: app.Name, Workload: workload}
+	apps = append(apps, configured)
 	if err := c.store.Save(apps); err != nil {
 		return domain.AppConfig{}, err
 	}
-	return app, nil
+	return configured, nil
+}
+
+// findCandidate returns the discovered candidate matching want's identity
+// (kind, namespace, name), ignoring want.Selector.
+func findCandidate(candidates []cluster.Workload, want cluster.Workload) (cluster.Workload, bool) {
+	for _, candidate := range candidates {
+		if candidate.Kind == want.Kind && candidate.Namespace == want.Namespace && candidate.Name == want.Name {
+			return candidate, true
+		}
+	}
+	return cluster.Workload{}, false
 }
 
 // ListApps returns the currently configured Apps.
