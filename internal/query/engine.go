@@ -55,15 +55,20 @@ func (e *Engine) Run(queryText string) (domain.Result, error) {
 	now := e.Now()
 
 	remaining, names := extractAppNames(queryText)
-	scopedApps, canonicalNames, err := matchConfiguredApps(names, e.apps)
+	scopedApps, err := matchConfiguredApps(names, e.apps)
 	if err != nil {
 		return domain.Result{}, err
 	}
 
 	filter := domain.Filter{
-		Apps:  canonicalNames,
 		Since: now.Add(-defaultWindow),
 		Until: now,
+	}
+	if len(names) > 0 {
+		filter.Apps = make([]string, len(scopedApps))
+		for i, app := range scopedApps {
+			filter.Apps[i] = app.Name
+		}
 	}
 	if remaining != "" {
 		filter.Keywords = []string{remaining}
@@ -128,23 +133,22 @@ func extractAppNames(queryText string) (remaining string, names []string) {
 }
 
 // matchConfiguredApps resolves names (as extracted by extractAppNames)
-// against apps, matching case-insensitively. It returns the scoped Apps and
-// their canonical (as-configured) names, or an error listing the configured
-// App names if any name isn't configured. No names scopes to all of apps,
-// per CONTEXT.md's "no named Apps -> all configured Apps" default.
-func matchConfiguredApps(names []string, apps []domain.AppConfig) (scoped []domain.AppConfig, canonicalNames []string, err error) {
+// against apps, matching case-insensitively. It returns the scoped Apps, or
+// an error listing the configured App names if any name isn't configured. No
+// names scopes to all of apps, per CONTEXT.md's "no named Apps -> all
+// configured Apps" default.
+func matchConfiguredApps(names []string, apps []domain.AppConfig) (scoped []domain.AppConfig, err error) {
 	if len(names) == 0 {
-		return apps, nil, nil
+		return apps, nil
 	}
 	for _, name := range names {
 		app, ok := findAppByName(apps, name)
 		if !ok {
-			return nil, nil, fmt.Errorf("query: app %q is not configured; configured apps: %s", name, configuredAppNamesList(apps))
+			return nil, fmt.Errorf("query: app %q is not configured; configured apps: %s", name, configuredAppNamesList(apps))
 		}
 		scoped = append(scoped, app)
-		canonicalNames = append(canonicalNames, app.Name)
 	}
-	return scoped, canonicalNames, nil
+	return scoped, nil
 }
 
 func findAppByName(apps []domain.AppConfig, name string) (domain.AppConfig, bool) {
