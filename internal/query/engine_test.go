@@ -430,6 +430,128 @@ func TestEngine_Run_unknownAppNameWithNoConfiguredApps(t *testing.T) {
 	}
 }
 
+func TestEngine_Run_lastNMinutesPhraseOverridesDefaultWindow(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	workload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	pod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(workload, []cluster.Pod{pod})
+	fake.SetLogsForPod(pod, []cluster.LogLine{
+		{Timestamp: now.Add(-45 * time.Minute), Text: "match but outside 30m window"},
+		{Timestamp: now.Add(-10 * time.Minute), Text: "match within 30m window"},
+	})
+
+	apps := []domain.AppConfig{{Name: "checkout", Workload: workload}}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("last 30 minutes match")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+	if result.Lines[0].Text != "match within 30m window" {
+		t.Errorf("Run() line = %q, want %q", result.Lines[0].Text, "match within 30m window")
+	}
+}
+
+func TestEngine_Run_inTheLastHourPhraseOverridesDefaultWindow(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	workload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	pod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(workload, []cluster.Pod{pod})
+	fake.SetLogsForPod(pod, []cluster.LogLine{
+		{Timestamp: now.Add(-2 * time.Hour), Text: "match but outside 1h window"},
+		{Timestamp: now.Add(-30 * time.Minute), Text: "match within 1h window"},
+	})
+
+	apps := []domain.AppConfig{{Name: "checkout", Workload: workload}}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("match in the last hour")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+	if result.Lines[0].Text != "match within 1h window" {
+		t.Errorf("Run() line = %q, want %q", result.Lines[0].Text, "match within 1h window")
+	}
+}
+
+func TestEngine_Run_noTimePhraseStillDefaultsToLastHour(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	workload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	pod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(workload, []cluster.Pod{pod})
+	fake.SetLogsForPod(pod, []cluster.LogLine{
+		{Timestamp: now.Add(-2 * time.Hour), Text: "match too old"},
+		{Timestamp: now.Add(-30 * time.Minute), Text: "match within default window"},
+	})
+
+	apps := []domain.AppConfig{{Name: "checkout", Workload: workload}}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("match")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+	if result.Lines[0].Text != "match within default window" {
+		t.Errorf("Run() line = %q, want %q", result.Lines[0].Text, "match within default window")
+	}
+}
+
+func TestEngine_Run_timePhraseAndAppNameAndKeywordAllCombineWithAND(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	checkoutWorkload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	workerWorkload := cluster.Workload{Kind: cluster.WorkloadKindStatefulSet, Namespace: "default", Name: "worker", Selector: cluster.Selector{"app": "worker"}}
+
+	checkoutPod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+	workerPod := cluster.Pod{Namespace: "default", Name: "worker-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(checkoutWorkload, []cluster.Pod{checkoutPod})
+	fake.SetPodsForWorkload(workerWorkload, []cluster.Pod{workerPod})
+	fake.SetLogsForPod(checkoutPod, []cluster.LogLine{
+		{Timestamp: now.Add(-90 * time.Minute), Text: "boom too old"},
+		{Timestamp: now.Add(-10 * time.Minute), Text: "boom recent"},
+	})
+	fake.SetLogsForPod(workerPod, []cluster.LogLine{
+		{Timestamp: now.Add(-10 * time.Minute), Text: "boom recent but wrong app"},
+	})
+
+	apps := []domain.AppConfig{
+		{Name: "checkout", Workload: checkoutWorkload},
+		{Name: "worker", Workload: workerWorkload},
+	}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("app:checkout last 30 minutes boom")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+	if result.Lines[0].Text != "boom recent" {
+		t.Errorf("Run() line = %q, want %q", result.Lines[0].Text, "boom recent")
+	}
+}
+
 func TestEngine_Run_noConfiguredApps(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	fake := cluster.NewFakeClusterClient()

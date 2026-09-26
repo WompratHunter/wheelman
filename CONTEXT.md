@@ -24,6 +24,7 @@ _Avoid_: Output, Response
 
 - Unscoped by default: no named Apps → all configured Apps; no time phrase → last 1 hour.
 - An App is named with an `app:<Name>` phrase (e.g. `app:checkout`), matched case-insensitively against configured App names; a query may repeat this phrase to scope to multiple Apps. This is a deliberate, explicit marker rather than bare-word matching, so an App reference is always unambiguous and distinguishable from ordinary keyword text.
+- A relative time phrase (e.g. `last 30 minutes`, `in the last hour`) overrides the default 1-hour window; a bare unit with no count (e.g. `the last hour`) implies a count of 1.
 - Severity is matched via keyword/regex ("ERROR", "WARN", ...) uniformly — most container logs are unstructured text, not JSON with a level field.
 - Naming an App that isn't configured is an error listing the configured Apps, never a fuzzy-matched guess.
 - Text not recognized as a time/severity/App phrase falls back to a literal keyword/regex search term — no query is ever rejected as unparseable.
