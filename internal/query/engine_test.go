@@ -706,6 +706,44 @@ func TestEngine_Run_severityAppNameAndTimePhraseAllCombineWithAND(t *testing.T) 
 	}
 }
 
+func TestEngine_Run_multipleSeveritiesCombineWithOR(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	workload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	pod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(workload, []cluster.Pod{pod})
+	fake.SetLogsForPod(pod, []cluster.LogLine{
+		{Timestamp: now.Add(-30 * time.Minute), Text: "ERROR db connection refused"},
+		{Timestamp: now.Add(-20 * time.Minute), Text: "WARN cache miss for key foo"},
+		{Timestamp: now.Add(-10 * time.Minute), Text: "INFO server started"},
+	})
+
+	apps := []domain.AppConfig{{Name: "checkout", Workload: workload}}
+	e := newTestEngine(t, apps, fake, now)
+
+	// Two severity terms in one query should OR against each other (a line
+	// matching either counts), not require both on the same line.
+	result, err := e.Run("error warn")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	gotTexts := make([]string, len(result.Lines))
+	for i, l := range result.Lines {
+		gotTexts[i] = l.Text
+	}
+	wantLines := []string{"ERROR db connection refused", "WARN cache miss for key foo"}
+	if len(gotTexts) != len(wantLines) {
+		t.Fatalf("Run(\"error warn\") lines = %v, want %v", gotTexts, wantLines)
+	}
+	for i, want := range wantLines {
+		if gotTexts[i] != want {
+			t.Errorf("Run(\"error warn\") line[%d] = %q, want %q", i, gotTexts[i], want)
+		}
+	}
+}
+
 func TestEngine_Run_noConfiguredApps(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	fake := cluster.NewFakeClusterClient()

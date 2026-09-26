@@ -123,8 +123,24 @@ func (e *Engine) Run(queryText string) (domain.Result, error) {
 	}
 
 	var matchers []func(string) bool
-	for _, severity := range filter.Severities {
-		matchers = append(matchers, keywordMatcher(severity))
+	if len(filter.Severities) > 0 {
+		// Recognized severities combine with each other via OR (a line
+		// matching any one of them counts as a severity match), and that
+		// combined severity condition then ANDs with everything else, per
+		// CONTEXT.md's "all recognized conditions combine with AND only"
+		// rule applied at the condition level, not the term level.
+		severityMatchers := make([]func(string) bool, len(filter.Severities))
+		for i, severity := range filter.Severities {
+			severityMatchers[i] = keywordMatcher(severity)
+		}
+		matchers = append(matchers, func(text string) bool {
+			for _, m := range severityMatchers {
+				if m(text) {
+					return true
+				}
+			}
+			return false
+		})
 	}
 	if len(filter.Keywords) > 0 {
 		matchers = append(matchers, keywordMatcher(filter.Keywords[0]))
