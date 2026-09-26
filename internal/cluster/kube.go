@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -182,7 +183,7 @@ func parseLogLines(r io.Reader) ([]LogLine, error) {
 // splitTimestamp splits a line of the form "<RFC3339Nano timestamp> <rest>"
 // as emitted when PodLogOptions.Timestamps is set.
 func splitTimestamp(line string) (time.Time, string, bool) {
-	idx := bytes.IndexByte([]byte(line), ' ')
+	idx := strings.IndexByte(line, ' ')
 	if idx < 0 {
 		return time.Time{}, "", false
 	}
