@@ -1,6 +1,7 @@
 package query_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -755,5 +756,49 @@ func TestEngine_Run_noConfiguredApps(t *testing.T) {
 	}
 	if len(result.Lines) != 0 {
 		t.Errorf("Run() returned %d lines, want 0", len(result.Lines))
+	}
+}
+
+func TestEngine_Run_resultCarriesCompiledFilter(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	checkoutWorkload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	apps := []domain.AppConfig{{Name: "checkout", Workload: checkoutWorkload}}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(checkoutWorkload, nil)
+
+	tests := []struct {
+		name  string
+		query string
+		want  domain.Filter
+	}{
+		{
+			name:  "defaults",
+			query: "",
+			want:  domain.Filter{Since: now.Add(-time.Hour), Until: now},
+		},
+		{
+			name:  "all conditions",
+			query: "app:Checkout errors timeout last 15 minutes",
+			want: domain.Filter{
+				Apps:       []string{"checkout"},
+				Since:      now.Add(-15 * time.Minute),
+				Until:      now,
+				Severities: []string{"ERROR"},
+				Keywords:   []string{"timeout"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := newTestEngine(t, apps, fake, now).Run(tt.query)
+			if err != nil {
+				t.Fatalf("Run() returned error: %v", err)
+			}
+			if !reflect.DeepEqual(result.Filter, tt.want) {
+				t.Errorf("Run() Filter = %+v, want %+v", result.Filter, tt.want)
+			}
+		})
 	}
 }

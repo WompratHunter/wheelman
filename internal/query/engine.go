@@ -187,7 +187,7 @@ func (e *Engine) Run(queryText string) (domain.Result, error) {
 		return lines[i].Timestamp.Before(lines[j].Timestamp)
 	})
 
-	return domain.Result{Lines: lines}, nil
+	return domain.Result{Filter: filter, Lines: lines}, nil
 }
 
 // extractAppNames pulls every "app:<Name>" phrase out of queryText, returning

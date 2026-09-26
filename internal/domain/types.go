@@ -48,5 +48,9 @@ type ResultLine struct {
 // Result is the flat, chronologically-ordered stream of log lines produced
 // by running a Filter.
 type Result struct {
+	// Filter is the Filter the Query compiled to, carried alongside the
+	// lines so a Query's intent stays inspectable after it runs.
+	Filter Filter
+
 	Lines []ResultLine
 }
