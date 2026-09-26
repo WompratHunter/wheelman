@@ -37,6 +37,31 @@ var timeUnits = map[string]time.Duration{
 	"hour": time.Hour, "hours": time.Hour, "hr": time.Hour, "hrs": time.Hour,
 }
 
+// severityPhrase recognizes a severity term, e.g. "error" or "warnings". See
+// CONTEXT.md's Query-to-Filter compilation rules: severity is matched via
+// keyword/regex uniformly, whether the underlying log line is plain text or
+// structured JSON.
+var severityPhrase = regexp.MustCompile(`(?i)\b(errors?|warnings?|warns?|infos?|debugs?)\b`)
+
+// severityTerms maps a recognized severity token (as matched by
+// severityPhrase, lowercased) to the canonical keyword/regex pattern applied
+// against raw log text.
+var severityTerms = map[string]string{
+	"error":  "ERROR",
+	"errors": "ERROR",
+
+	"warn":     "WARN",
+	"warns":    "WARN",
+	"warning":  "WARN",
+	"warnings": "WARN",
+
+	"info":  "INFO",
+	"infos": "INFO",
+
+	"debug":  "DEBUG",
+	"debugs": "DEBUG",
+}
+
 // Engine is the single entry point for running a Query against Wheelman's
 // configured Apps.
 type Engine struct {
@@ -60,10 +85,13 @@ func NewEngine(apps []domain.AppConfig, client cluster.ClusterClient) *Engine {
 // Run parses queryText into a Filter and executes it, returning a flat,
 // chronologically-ordered, App/pod-tagged Result.
 //
-// Beyond App-name recognition (via "app:<Name>" phrases) and relative time
+// Beyond App-name recognition (via "app:<Name>" phrases), relative time
 // phrases (e.g. "last 30 minutes", "in the last hour", overriding the
-// default 1-hour window), v1 has no further query grammar yet: any remaining
-// query text is treated as a single literal keyword/regex search term. See
+// default 1-hour window), and severity terms (e.g. "error", "warn",
+// matched via keyword/regex against raw log text, uniformly whether the
+// line is plain text or structured JSON), v1 has no further query grammar
+// yet: any remaining query text is treated as a single literal
+// keyword/regex search term, AND-combined with any recognized severity. See
 // CONTEXT.md's "unrecognized text falls back to keyword search" rule.
 func (e *Engine) Run(queryText string) (domain.Result, error) {
 	now := e.Now()
@@ -75,6 +103,7 @@ func (e *Engine) Run(queryText string) (domain.Result, error) {
 	}
 
 	remaining, window := extractTimeWindow(remaining)
+	remaining, severities := extractSeverities(remaining)
 
 	filter := domain.Filter{
 		Since: now.Add(-window),
@@ -86,13 +115,43 @@ func (e *Engine) Run(queryText string) (domain.Result, error) {
 			filter.Apps[i] = app.Name
 		}
 	}
+	if len(severities) > 0 {
+		filter.Severities = severities
+	}
 	if remaining != "" {
 		filter.Keywords = []string{remaining}
 	}
 
-	match := func(string) bool { return true }
+	var matchers []func(string) bool
+	if len(filter.Severities) > 0 {
+		// Recognized severities combine with each other via OR (a line
+		// matching any one of them counts as a severity match), and that
+		// combined severity condition then ANDs with everything else, per
+		// CONTEXT.md's "all recognized conditions combine with AND only"
+		// rule applied at the condition level, not the term level.
+		severityMatchers := make([]func(string) bool, len(filter.Severities))
+		for i, severity := range filter.Severities {
+			severityMatchers[i] = keywordMatcher(severity)
+		}
+		matchers = append(matchers, func(text string) bool {
+			for _, m := range severityMatchers {
+				if m(text) {
+					return true
+				}
+			}
+			return false
+		})
+	}
 	if len(filter.Keywords) > 0 {
-		match = keywordMatcher(filter.Keywords[0])
+		matchers = append(matchers, keywordMatcher(filter.Keywords[0]))
+	}
+	match := func(text string) bool {
+		for _, m := range matchers {
+			if !m(text) {
+				return false
+			}
+		}
+		return true
 	}
 
 	ctx := context.Background()
@@ -175,6 +234,27 @@ func extractTimeWindow(queryText string) (remaining string, window time.Duration
 	})
 	remaining = strings.TrimSpace(strings.Join(strings.Fields(remaining), " "))
 	return remaining, window
+}
+
+// extractSeverities pulls every recognized severity term out of queryText,
+// returning the canonical keyword/regex patterns (in first-seen order,
+// deduplicated) and the remaining text with those terms removed and
+// whitespace collapsed. Matching is uniform regardless of whether the
+// underlying log line is plain text or structured JSON: severity is just
+// another keyword/regex condition applied against raw log text, per
+// CONTEXT.md's Query-to-Filter compilation rules.
+func extractSeverities(queryText string) (remaining string, severities []string) {
+	seen := make(map[string]bool)
+	remaining = severityPhrase.ReplaceAllStringFunc(queryText, func(match string) string {
+		canonical := severityTerms[strings.ToLower(match)]
+		if !seen[canonical] {
+			seen[canonical] = true
+			severities = append(severities, canonical)
+		}
+		return ""
+	})
+	remaining = strings.TrimSpace(strings.Join(strings.Fields(remaining), " "))
+	return remaining, severities
 }
 
 // matchConfiguredApps resolves names (as extracted by extractAppNames)

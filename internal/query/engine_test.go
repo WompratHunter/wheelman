@@ -578,6 +578,172 @@ func TestEngine_Run_timePhraseAndAppNameAndKeywordAllCombineWithAND(t *testing.T
 	}
 }
 
+func TestEngine_Run_severityKeywordMatching(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	workload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	pod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	// A mix of plain-text and structured-JSON log lines, of mixed severity,
+	// so severity matching is verified uniformly across both shapes.
+	logLines := []cluster.LogLine{
+		{Timestamp: now.Add(-50 * time.Minute), Text: "ERROR db connection refused"},
+		{Timestamp: now.Add(-40 * time.Minute), Text: "WARN cache miss for key foo"},
+		{Timestamp: now.Add(-30 * time.Minute), Text: "starting up, no severity here"},
+		{Timestamp: now.Add(-20 * time.Minute), Text: `{"level":"error","msg":"payment gateway timeout"}`},
+		{Timestamp: now.Add(-10 * time.Minute), Text: `{"level":"warn","msg":"retrying request"}`},
+	}
+
+	tests := []struct {
+		name      string
+		query     string
+		wantLines []string
+	}{
+		{
+			name:  "error term matches plain-text and structured JSON error lines",
+			query: "error",
+			wantLines: []string{
+				"ERROR db connection refused",
+				`{"level":"error","msg":"payment gateway timeout"}`,
+			},
+		},
+		{
+			name:  "warn term matches plain-text and structured JSON warn lines",
+			query: "warn",
+			wantLines: []string{
+				"WARN cache miss for key foo",
+				`{"level":"warn","msg":"retrying request"}`,
+			},
+		},
+		{
+			name:  "warning synonym matches the same lines as warn",
+			query: "warning",
+			wantLines: []string{
+				"WARN cache miss for key foo",
+				`{"level":"warn","msg":"retrying request"}`,
+			},
+		},
+		{
+			name:  "severity term AND-combines with remaining keyword text",
+			query: "error timeout",
+			wantLines: []string{
+				`{"level":"error","msg":"payment gateway timeout"}`,
+			},
+		},
+		{
+			name:      "severity term with no matching remaining keyword yields no results",
+			query:     "error cache",
+			wantLines: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := cluster.NewFakeClusterClient()
+			fake.SetPodsForWorkload(workload, []cluster.Pod{pod})
+			fake.SetLogsForPod(pod, logLines)
+
+			apps := []domain.AppConfig{{Name: "checkout", Workload: workload}}
+			e := newTestEngine(t, apps, fake, now)
+
+			result, err := e.Run(tt.query)
+			if err != nil {
+				t.Fatalf("Run(%q) returned error: %v", tt.query, err)
+			}
+
+			gotTexts := make([]string, len(result.Lines))
+			for i, l := range result.Lines {
+				gotTexts[i] = l.Text
+			}
+			if len(gotTexts) != len(tt.wantLines) {
+				t.Fatalf("Run(%q) lines = %v, want %v", tt.query, gotTexts, tt.wantLines)
+			}
+			for i, want := range tt.wantLines {
+				if gotTexts[i] != want {
+					t.Errorf("Run(%q) line[%d] = %q, want %q", tt.query, i, gotTexts[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestEngine_Run_severityAppNameAndTimePhraseAllCombineWithAND(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	checkoutWorkload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	workerWorkload := cluster.Workload{Kind: cluster.WorkloadKindStatefulSet, Namespace: "default", Name: "worker", Selector: cluster.Selector{"app": "worker"}}
+
+	checkoutPod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+	workerPod := cluster.Pod{Namespace: "default", Name: "worker-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(checkoutWorkload, []cluster.Pod{checkoutPod})
+	fake.SetPodsForWorkload(workerWorkload, []cluster.Pod{workerPod})
+	fake.SetLogsForPod(checkoutPod, []cluster.LogLine{
+		{Timestamp: now.Add(-90 * time.Minute), Text: "ERROR too old to be in window"},
+		{Timestamp: now.Add(-10 * time.Minute), Text: "ERROR payment failed"},
+		{Timestamp: now.Add(-10 * time.Minute), Text: "WARN payment slow"},
+	})
+	fake.SetLogsForPod(workerPod, []cluster.LogLine{
+		{Timestamp: now.Add(-10 * time.Minute), Text: "ERROR wrong app entirely"},
+	})
+
+	apps := []domain.AppConfig{
+		{Name: "checkout", Workload: checkoutWorkload},
+		{Name: "worker", Workload: workerWorkload},
+	}
+	e := newTestEngine(t, apps, fake, now)
+
+	result, err := e.Run("app:checkout last 30 minutes error")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+	if result.Lines[0].Text != "ERROR payment failed" {
+		t.Errorf("Run() line = %q, want %q", result.Lines[0].Text, "ERROR payment failed")
+	}
+}
+
+func TestEngine_Run_multipleSeveritiesCombineWithOR(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	workload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	pod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(workload, []cluster.Pod{pod})
+	fake.SetLogsForPod(pod, []cluster.LogLine{
+		{Timestamp: now.Add(-30 * time.Minute), Text: "ERROR db connection refused"},
+		{Timestamp: now.Add(-20 * time.Minute), Text: "WARN cache miss for key foo"},
+		{Timestamp: now.Add(-10 * time.Minute), Text: "INFO server started"},
+	})
+
+	apps := []domain.AppConfig{{Name: "checkout", Workload: workload}}
+	e := newTestEngine(t, apps, fake, now)
+
+	// Two severity terms in one query should OR against each other (a line
+	// matching either counts), not require both on the same line.
+	result, err := e.Run("error warn")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	gotTexts := make([]string, len(result.Lines))
+	for i, l := range result.Lines {
+		gotTexts[i] = l.Text
+	}
+	wantLines := []string{"ERROR db connection refused", "WARN cache miss for key foo"}
+	if len(gotTexts) != len(wantLines) {
+		t.Fatalf("Run(\"error warn\") lines = %v, want %v", gotTexts, wantLines)
+	}
+	for i, want := range wantLines {
+		if gotTexts[i] != want {
+			t.Errorf("Run(\"error warn\") line[%d] = %q, want %q", i, gotTexts[i], want)
+		}
+	}
+}
+
 func TestEngine_Run_noConfiguredApps(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	fake := cluster.NewFakeClusterClient()
