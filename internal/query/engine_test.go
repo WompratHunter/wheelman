@@ -486,6 +486,32 @@ func TestEngine_Run_inTheLastHourPhraseOverridesDefaultWindow(t *testing.T) {
 	}
 }
 
+func TestEngine_Run_bareLastHourPhraseWithNoCountIsRecognizedAndStripped(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+
+	workload := cluster.Workload{Kind: cluster.WorkloadKindDeployment, Namespace: "default", Name: "checkout", Selector: cluster.Selector{"app": "checkout"}}
+	pod := cluster.Pod{Namespace: "default", Name: "checkout-0"}
+
+	fake := cluster.NewFakeClusterClient()
+	fake.SetPodsForWorkload(workload, []cluster.Pod{pod})
+	fake.SetLogsForPod(pod, []cluster.LogLine{
+		{Timestamp: now.Add(-10 * time.Minute), Text: "boom"},
+	})
+
+	apps := []domain.AppConfig{{Name: "checkout", Workload: workload}}
+	e := newTestEngine(t, apps, fake, now)
+
+	// If "last hour" weren't recognized and stripped, the remaining keyword
+	// text "boom last hour" would fail to match the log line "boom".
+	result, err := e.Run("boom last hour")
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Run() returned %d lines, want 1: %+v", len(result.Lines), result.Lines)
+	}
+}
+
 func TestEngine_Run_noTimePhraseStillDefaultsToLastHour(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 
